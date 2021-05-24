@@ -1,64 +1,87 @@
-#!/bin/bash
+#!/bin/sh
+#########################################################################
+# File Name: start.sh
+# Author: TiMOphY
+#########################################################################
+Nginx_Install_Dir=/usr/local/nginx
+DATA_DIR=/data/www
 
-# UPDATE THE WEBROOT IF REQUIRED.
-if [[ ! -z "${WEBROOT}" ]] && [[ ! -z "${WEBROOT_PUBLIC}" ]]; then
-    sed -i "s#root /var/www/public;#root ${WEBROOT_PUBLIC};#g" /etc/nginx/sites-available/default.conf
-else
-    export WEBROOT=/var/www
-    export WEBROOT_PUBLIC=/var/www/public
-fi
+set -e
 
-# UPDATE COMPOSER PACKAGES ON BUILD.
-## 💡 THIS MAY MAKE THE BUILD SLOWER BECAUSE IT HAS TO FETCH PACKAGES.
-if [[ ! -z "${COMPOSER_DIRECTORY}" ]] && [[ "${COMPOSER_INSTALL_ON_BUILD}" == "1" ]]; then
-    cd ${COMPOSER_DIRECTORY}
-    composer install && composer dump-autoload -o
-fi
+chown -R www.www $DATA_DIR
 
-# LARAVEL APPLICATION
-if [[ "${LARAVEL_APP}" == "1" ]]; then
-    # RUN LARAVEL MIGRATIONS ON BUILD.
-    if [[ "${RUN_LARAVEL_MIGRATIONS_ON_BUILD}" == "1" ]]; then
-        cd ${WEBROOT}
-        php artisan migrate
+if [[ -n "$PROXY_WEB" ]]; then
+
+    [ -f "${Nginx_Install_Dir}/conf/ssl" ] || mkdir -p $Nginx_Install_Dir/conf/ssl
+    [ -f "${Nginx_Install_Dir}/conf/vhost" ] || mkdir -p $Nginx_Install_Dir/conf/vhost
+
+    if [ -z "$PROXY_DOMAIN" ]; then
+            echo >&2 'error:  missing PROXY_DOMAIN'
+            echo >&2 '  Did you forget to add -e PROXY_DOMAIN=... ?'
+            exit 1
     fi
 
-    # LARAVEL SCHEDULER
-    if [[ "${RUN_LARAVEL_SCHEDULER}" == "1" ]]; then
-        echo '* * * * * cd /var/www && php artisan schedule:run >> /dev/null 2>&1' > /etc/crontabs/root
-        crond
-    fi
+    if [ -z "$PROXY_CRT" ]; then
+         echo >&2 'error:  missing PROXY_CRT'
+         echo >&2 '  Did you forget to add -e PROXY_CRT=... ?'
+         exit 1
+     fi
+
+     if [ -z "$PROXY_KEY" ]; then
+             echo >&2 'error:  missing PROXY_KEY'
+             echo >&2 '  Did you forget to add -e PROXY_KEY=... ?'
+             exit 1
+     fi
+
+     if [ ! -f "${Nginx_Install_Dir}/conf/ssl/${PROXY_CRT}" ]; then
+             echo >&2 'error:  missing PROXY_CRT'
+             echo >&2 "  You need to put ${PROXY_CRT} in ssl directory"
+             exit 1
+     fi
+
+     if [ ! -f "${Nginx_Install_Dir}/conf/ssl/${PROXY_KEY}" ]; then
+             echo >&2 'error:  missing PROXY_CSR'
+             echo >&2 "  You need to put ${PROXY_KEY} in ssl directory"
+             exit 1
+     fi
+
+    cat > ${Nginx_Install_Dir}/conf/vhost/website.conf << EOF
+server {
+    listen 80;
+    server_name $PROXY_DOMAIN;
+    return 301 https://$PROXY_DOMAIN\$request_uri;
+    }
+
+server {
+    listen 443 ssl;
+    server_name $PROXY_DOMAIN;
+
+    ssl on;
+    ssl_certificate ssl/${PROXY_CRT};
+    ssl_certificate_key ssl/${PROXY_KEY};
+    ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers "EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH";
+    keepalive_timeout 70;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    root   $DATA_DIR;
+    index  index.php index.html index.htm;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$args;
+    }
+
+    location ~ \.php$ {
+        root           /data/www;
+        fastcgi_pass   127.0.0.1:9000;
+        fastcgi_index  index.php;
+        fastcgi_param  SCRIPT_FILENAME  /\$document_root\$fastcgi_script_name;
+        include        fastcgi_params;
+    }
+}
+EOF
 fi
 
-# SYMLINK CONFIGURATION FILES.
-ln -s /etc/php7/php.ini /etc/php7/conf.d/php.ini
-ln -s /etc/nginx/sites-available/default.conf /etc/nginx/sites-enabled/default.conf
-
-# PRODUCTION LEVEL CONFIGURATION.
-if [[ "${PRODUCTION}" == "1" ]]; then
-    sed -i -e "s/;log_level = notice/log_level = warning/g" /etc/php7/php-fpm.conf
-    sed -i -e "s/clear_env = no/clear_env = yes/g" /etc/php7/php-fpm.d/www.conf
-    sed -i -e "s/display_errors = On/display_errors = Off/g" /etc/php7/php.ini
-else
-    sed -i -e "s/;log_level = notice/log_level = notice/g" /etc/php7/php-fpm.conf
-    sed -i -e "s/;daemonize\s*=\s*yes/daemonize = no/g" /etc/php7/php-fpm.conf
-fi
-
-# PHP & SERVER CONFIGURATIONS.
-if [[ ! -z "${PHP_MEMORY_LIMIT}" ]]; then
-    sed -i "s/memory_limit = 128M/memory_limit = ${PHP_MEMORY_LIMIT}M/g" /etc/php7/conf.d/php.ini
-fi
-
-if [ ! -z "${PHP_POST_MAX_SIZE}" ]; then
-    sed -i "s/post_max_size = 50M/post_max_size = ${PHP_POST_MAX_SIZE}M/g" /etc/php7/conf.d/php.ini
-fi
-
-if [ ! -z "${PHP_UPLOAD_MAX_FILESIZE}" ]; then
-    sed -i "s/upload_max_filesize = 10M/upload_max_filesize = ${PHP_UPLOAD_MAX_FILESIZE}M/g" /etc/php7/conf.d/php.ini
-fi
-
-
-find /etc/php7/conf.d/ -name "*.ini" -exec sed -i -re 's/^(\s*)#(.*)/\1;\2/g' {} \;
-
-# START SUPERVISOR.
-exec /usr/bin/supervisord -n -c /etc/supervisord.conf
+/usr/bin/supervisord -n -c /etc/supervisord.conf
