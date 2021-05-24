@@ -147,7 +147,7 @@ do_install_docker()
 
     docker --info >& /dev/null
     if [ $? -ne 0 ]; then
-        curl -sSL https://gsgameshare.com/gsdocker | bash -s docker --mirror Aliyun
+        curl -sSL http://10.106.38.246/tlgame/docker-ce.sh | bash -s docker --mirror Aliyun
         if [ ! -e "/etc/docker" ]; then
             sudo mkdir -p /etc/docker
             sudo tee /etc/docker/daemon.json <<EOF
